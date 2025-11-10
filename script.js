@@ -83,16 +83,37 @@ async function handleSnatch() {
 }
 
 async function fetchSiteContent(url) {
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    // Try multiple CORS proxies for better reliability
+    const proxies = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+    ];
     
-    const response = await fetch(proxyUrl);
+    let lastError = null;
     
-    if (!response.ok) {
-        throw new Error('Network response was not ok');
+    for (const proxyUrl of proxies) {
+        try {
+            const response = await fetch(proxyUrl, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                }
+            });
+            
+            if (response.ok) {
+                const html = await response.text();
+                if (html && html.length > 100) {
+                    return html;
+                }
+            }
+        } catch (error) {
+            lastError = error;
+            console.debug('Proxy failed, trying next...', proxyUrl);
+        }
     }
     
-    const html = await response.text();
-    return html;
+    throw lastError || new Error('All proxies failed to fetch the website');
 }
 
 async function extractStyles(html, baseUrl) {
@@ -101,57 +122,112 @@ async function extractStyles(html, baseUrl) {
     
     let allStyles = '';
     
-    // Extract inline styles from <style> tags
-    const styleTags = doc.querySelectorAll('style');
-    for (const tag of styleTags) {
-        allStyles += tag.textContent + '\n';
-    }
+    // Extract inline styles from <style> tags (most reliable)
+    allStyles += extractInlineStyles(doc);
     
-    // Extract linked stylesheets (limited to avoid too many requests)
-    const linkTags = Array.from(doc.querySelectorAll('link[rel="stylesheet"]')).slice(0, 5);
+    // Extract inline styles from elements (second most reliable)
+    allStyles += extractElementStyles(doc);
     
-    for (const link of linkTags) {
-        try {
-            const href = link.getAttribute('href');
-            if (href) {
-                const cssUrl = new URL(href, baseUrl).href;
-                const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(cssUrl)}`;
-                const response = await fetch(proxyUrl);
-                if (response.ok) {
-                    const css = await response.text();
-                    allStyles += css + '\n';
-                }
-            }
-        } catch (e) {
-            console.warn('Failed to fetch stylesheet:', e);
-        }
-    }
+    // Extract CSS variables from :root
+    allStyles += extractRootVariables(doc);
     
-    // Also extract inline styles from elements
-    const elementsWithStyle = doc.querySelectorAll('[style]');
-    for (const el of elementsWithStyle) {
-        allStyles += el.getAttribute('style') + ';';
+    // Try to fetch external stylesheets if we don't have enough inline styles
+    if (allStyles.length < 500) {
+        allStyles += await fetchExternalStylesheets(doc, baseUrl);
     }
     
     return allStyles;
 }
 
+function extractInlineStyles(doc) {
+    let styles = '';
+    const styleTags = doc.querySelectorAll('style');
+    for (const tag of styleTags) {
+        styles += tag.textContent + '\n';
+    }
+    return styles;
+}
+
+function extractElementStyles(doc) {
+    let styles = '';
+    const elementsWithStyle = doc.querySelectorAll('[style]');
+    for (const el of elementsWithStyle) {
+        styles += el.getAttribute('style') + ';';
+    }
+    return styles;
+}
+
+function extractRootVariables(doc) {
+    let styles = '';
+    const rootStyles = doc.querySelectorAll('style');
+    for (const style of rootStyles) {
+        const content = style.textContent;
+        const rootMatch = content.match(/:root\s*{([^}]+)}/);
+        if (rootMatch) {
+            styles += ':root {' + rootMatch[1] + '}\n';
+        }
+    }
+    return styles;
+}
+
+async function fetchExternalStylesheets(doc, baseUrl) {
+    let styles = '';
+    const linkTags = Array.from(doc.querySelectorAll('link[rel="stylesheet"]')).slice(0, 3);
+    
+    for (const link of linkTags) {
+        const href = link.getAttribute('href');
+        if (href) {
+            try {
+                const cssUrl = new URL(href, baseUrl).href;
+                const response = await fetch(cssUrl, { mode: 'cors' }).catch(() => null);
+                if (response?.ok) {
+                    const css = await response.text();
+                    styles += css + '\n';
+                }
+            } catch (error) {
+                console.debug('Skipped external stylesheet:', href, error.message);
+            }
+        }
+    }
+    
+    return styles;
+}
+
 function extractColors(cssText) {
     const colorMap = new Map();
     
-    // Regex patterns for different color formats
-    const hexPattern = /#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/g;
-    const rgbPattern = /rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)/g;
-    const hslPattern = /hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/g;
+    // Extract all color formats
+    extractHexColors(cssText, colorMap);
+    extractRgbColors(cssText, colorMap);
+    extractHslColors(cssText, colorMap);
     
-    // Extract hex colors
+    // Filter and deduplicate colors
+    return getUniqueColorPalette(colorMap, cssText);
+}
+
+function getUniqueColorPalette(colorMap, cssText) {
+    const uniqueColors = filterAndDeduplicateColors(colorMap);
+    
+    // Only return default colors if we found absolutely nothing
+    if (uniqueColors.length === 0 && cssText.length < 100) {
+        return [];
+    }
+    
+    return uniqueColors.length > 0 ? uniqueColors : ['#2563eb', '#0891b2', '#059669'];
+}
+
+function extractHexColors(cssText, colorMap) {
+    const hexPattern = /#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b/g;
     let match;
     while ((match = hexPattern.exec(cssText)) !== null) {
         const hex = normalizeHex(match[0]);
         colorMap.set(hex, (colorMap.get(hex) || 0) + 1);
     }
-    
-    // Extract RGB colors and convert to hex
+}
+
+function extractRgbColors(cssText, colorMap) {
+    const rgbPattern = /rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)/g;
+    let match;
     while ((match = rgbPattern.exec(cssText)) !== null) {
         const r = Number.parseInt(match[1], 10);
         const g = Number.parseInt(match[2], 10);
@@ -161,8 +237,11 @@ function extractColors(cssText) {
             colorMap.set(hex, (colorMap.get(hex) || 0) + 1);
         }
     }
-    
-    // Extract HSL colors and convert to hex
+}
+
+function extractHslColors(cssText, colorMap) {
+    const hslPattern = /hsla?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/g;
+    let match;
     while ((match = hslPattern.exec(cssText)) !== null) {
         const h = Number.parseFloat(match[1]);
         const s = Number.parseFloat(match[2]);
@@ -172,15 +251,24 @@ function extractColors(cssText) {
             colorMap.set(hex, (colorMap.get(hex) || 0) + 1);
         }
     }
-    
-    // Filter out common unwanted colors (white, black, transparent equivalents)
+}
+
+function filterAndDeduplicateColors(colorMap) {
     const filteredColors = Array.from(colorMap.entries())
         .filter(([color]) => !isCommonColor(color))
         .sort((a, b) => b[1] - a[1])
-        .slice(0, 7)
+        .slice(0, 12)
         .map(([color]) => color);
     
-    return filteredColors.length > 0 ? filteredColors : ['#2563eb', '#0891b2', '#059669'];
+    const uniqueColors = [];
+    for (const color of filteredColors) {
+        if (!hasSimilarColor(uniqueColors, color)) {
+            uniqueColors.push(color);
+            if (uniqueColors.length >= 7) break;
+        }
+    }
+    
+    return uniqueColors;
 }
 
 function extractFonts(cssText) {
@@ -406,7 +494,7 @@ function hslToHex(h, s, l) {
 }
 
 function isCommonColor(hex) {
-    const common = ['#ffffff', '#fff', '#000000', '#000', '#transparent', '#fefefe', '#010101'];
+    const common = ['#ffffff', '#fff', '#000000', '#000', '#transparent', '#fefefe', '#010101', '#fcfcfc', '#fdfdfd'];
     return common.includes(hex.toLowerCase());
 }
 
@@ -416,6 +504,36 @@ function isValidRgbValue(value) {
 
 function isValidHslValue(h, s, l) {
     return h >= 0 && h <= 360 && s >= 0 && s <= 100 && l >= 0 && l <= 100;
+}
+
+function hasSimilarColor(colors, newColor) {
+    // Check if a similar color already exists
+    const newRgb = hexToRgb(newColor);
+    if (!newRgb) return false;
+    
+    for (const existingColor of colors) {
+        const existingRgb = hexToRgb(existingColor);
+        if (!existingRgb) continue;
+        
+        // Calculate color difference
+        const diff = Math.abs(newRgb.r - existingRgb.r) +
+                     Math.abs(newRgb.g - existingRgb.g) +
+                     Math.abs(newRgb.b - existingRgb.b);
+        
+        // If colors are very similar (difference < 30), consider them duplicate
+        if (diff < 30) return true;
+    }
+    
+    return false;
+}
+
+function hexToRgb(hex) {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+        r: Number.parseInt(result[1], 16),
+        g: Number.parseInt(result[2], 16),
+        b: Number.parseInt(result[3], 16)
+    } : null;
 }
 
 function parseFontStack(fontStack) {

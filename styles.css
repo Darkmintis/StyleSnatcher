@@ -83,24 +83,6 @@ body {
     margin-bottom: var(--spacing-lg);
 }
 
-.logo {
-    display: inline-block;
-    width: 64px;
-    height: 64px;
-    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-    border-radius: var(--radius-2xl);
-    padding: var(--spacing-sm);
-    margin-bottom: var(--spacing-md);
-    box-shadow: var(--shadow-xl);
-    color: white;
-    animation: float 3s ease-in-out infinite;
-}
-
-@keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-8px); }
-}
-
 .title {
     font-size: 3.5rem;
     font-weight: 900;
@@ -441,17 +423,44 @@ body {
     font-size: 0.875rem;
 }
 
+.footer-link {
+    color: var(--primary-color);
+    text-decoration: none;
+    font-weight: 600;
+    transition: all var(--transition-base);
+    position: relative;
+}
+
+.footer-link:hover {
+    color: var(--primary-hover);
+}
+
+.footer-link::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 0;
+    width: 0;
+    height: 2px;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    transition: width var(--transition-base);
+}
+
+.footer-link:hover::after {
+    width: 100%;
+}
+
 /* ===================================
    Responsive Design
    =================================== */
 
 @media (max-width: 768px) {
     .title {
-        font-size: 2rem;
+        font-size: 2.5rem;
     }
     
     .tagline {
-        font-size: 1rem;
+        font-size: 1.125rem;
     }
     
     .input-wrapper {
@@ -473,11 +482,15 @@ body {
     }
     
     .header {
-        padding: var(--spacing-lg) 0;
+        padding: var(--spacing-xl) 0;
     }
     
     .title {
-        font-size: 1.75rem;
+        font-size: 2rem;
+    }
+    
+    .tagline {
+        font-size: 1rem;
     }
     
     .input-section,
